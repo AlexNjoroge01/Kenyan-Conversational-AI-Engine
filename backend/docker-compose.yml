@@ -1,7 +1,9 @@
 # Local development stack.
 #   docker compose up -d postgres            -> database only (run the API on the host with `bun run dev`)
-#   docker compose up --build api postgres   -> API + database, model providers mocked (no GPU needed)
-#   docker compose --profile gpu up --build  -> also starts the real model workers (needs an NVIDIA GPU)
+#   docker compose up --build api postgres   -> API + database using Groq + your GPU worker (set GROQ_API_KEY,
+#                                               SLM_SERVICE_URL, TTS_SERVICE_URL and WORKER_API_KEY in .env)
+#   docker compose --profile gpu up --build  -> also starts local model workers (needs an NVIDIA GPU; point the
+#                                               *_SERVICE_URL variables at http://slm-worker:8002 etc.)
 services:
   postgres:
     image: postgres:16-alpine
@@ -33,13 +35,12 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/kenya_engine
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (openssl rand -base64 48)}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
-      # Override to "http" (and start the gpu profile) to use the local workers, or STT_PROVIDER=groq with GROQ_API_KEY.
-      STT_PROVIDER: ${STT_PROVIDER:-mock}
-      SLM_PROVIDER: ${SLM_PROVIDER:-mock}
-      TTS_PROVIDER: ${TTS_PROVIDER:-mock}
-      STT_SERVICE_URL: http://stt-worker:8001
-      SLM_SERVICE_URL: http://slm-worker:8002
-      TTS_SERVICE_URL: http://tts-worker:8000
+      STT_PROVIDER: ${STT_PROVIDER:-groq}
+      SLM_PROVIDER: ${SLM_PROVIDER:-http}
+      TTS_PROVIDER: ${TTS_PROVIDER:-http}
+      STT_SERVICE_URL: ${STT_SERVICE_URL:-http://stt-worker:8001}
+      SLM_SERVICE_URL: ${SLM_SERVICE_URL:?Set SLM_SERVICE_URL in .env (e.g. your ngrok domain)}
+      TTS_SERVICE_URL: ${TTS_SERVICE_URL:?Set TTS_SERVICE_URL in .env (e.g. your ngrok domain)}
       WORKER_API_KEY: ${WORKER_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
     healthcheck:

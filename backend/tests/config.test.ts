@@ -1,4 +1,4 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
 import { parse } from "pg-connection-string";
 import { effectiveUploadLimit } from "../src/config/env";
 import { normalizeDatabaseUrl } from "../src/db/connection-string";
@@ -17,9 +17,12 @@ async function loadEnv(vars: Record<string, string>) {
       DOTENV_CONFIG_PATH: "./does-not-exist.env",
       DATABASE_URL: "postgres://u:p@localhost:5432/db",
       JWT_SECRET: "x".repeat(40),
-      STT_PROVIDER: "mock",
-      SLM_PROVIDER: "mock",
-      TTS_PROVIDER: "mock",
+      STT_PROVIDER: "groq",
+      GROQ_API_KEY: "gsk_test",
+      SLM_PROVIDER: "http",
+      SLM_SERVICE_URL: "https://worker.example.com",
+      TTS_PROVIDER: "http",
+      TTS_SERVICE_URL: "https://worker.example.com",
       ...vars,
     },
     stdout: "pipe",
@@ -33,13 +36,37 @@ async function loadEnv(vars: Record<string, string>) {
   return { ok: code === 0 && stdout.includes("ENV_OK"), output: stdout + stderr };
 }
 
+// Each case spawns a fresh Bun process, which can take a few seconds on slower machines.
+setDefaultTimeout(30_000);
+
 describe("environment validation", () => {
-  test("accepts the all-mock configuration", async () => {
+  test("accepts the production provider configuration (Groq + GPU worker)", async () => {
     expect((await loadEnv({})).ok).toBe(true);
   });
 
+  test("blank optional values, as copied from .env.example, count as unset", async () => {
+    const res = await loadEnv({ STT_SERVICE_URL: "", SLM_BASE_URL: "", SLM_API_KEY: "", SLM_MODEL: "", GROQ_BASE_URL: "https://api.groq.com/openai/v1" });
+    expect(res.output).toContain("ENV_OK");
+  });
+
+  test.each(["STT_PROVIDER", "SLM_PROVIDER", "TTS_PROVIDER"])("there is no mock mode: %s=mock is rejected", async (name) => {
+    const res = await loadEnv({ [name]: "mock" });
+    expect(res.ok).toBe(false);
+    expect(res.output).toContain(name);
+  });
+
+  test.each([
+    ["SLM_PROVIDER", "http", "SLM_SERVICE_URL"],
+    ["TTS_PROVIDER", "http", "TTS_SERVICE_URL"],
+    ["STT_PROVIDER", "http", "STT_SERVICE_URL"],
+  ])("%s=%s requires %s (no silent localhost default)", async (provider, value, urlVar) => {
+    const res = await loadEnv({ [provider]: value, [urlVar]: "" });
+    expect(res.ok).toBe(false);
+    expect(res.output).toContain(`${urlVar} is required`);
+  });
+
   test("STT_PROVIDER=groq requires GROQ_API_KEY", async () => {
-    const missing = await loadEnv({ STT_PROVIDER: "groq" });
+    const missing = await loadEnv({ STT_PROVIDER: "groq", GROQ_API_KEY: "" });
     expect(missing.ok).toBe(false);
     expect(missing.output).toContain("GROQ_API_KEY is required when STT_PROVIDER=groq");
     expect((await loadEnv({ STT_PROVIDER: "groq", GROQ_API_KEY: "gsk_test" })).ok).toBe(true);
@@ -80,6 +107,19 @@ describe("environment validation", () => {
     });
     expect(res.ok).toBe(true);
     expect(res.output).not.toContain("WARNING");
+  });
+});
+
+describe("provider wiring", () => {
+  test("the container builds the real providers from the environment", async () => {
+    const { createProvidersFromEnv } = await import("../src/services/container");
+    const { GroqSttProvider } = await import("../src/services/stt/groq-stt.provider");
+    const { QwenSlmProvider } = await import("../src/services/slm/qwen-slm.provider");
+    const { SautiTtsProvider } = await import("../src/services/tts/sauti-tts.provider");
+    const providers = createProvidersFromEnv();
+    expect(providers.stt).toBeInstanceOf(GroqSttProvider);
+    expect(providers.slm).toBeInstanceOf(QwenSlmProvider);
+    expect(providers.tts).toBeInstanceOf(SautiTtsProvider);
   });
 });
 

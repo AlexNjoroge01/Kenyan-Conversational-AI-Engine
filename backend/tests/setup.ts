@@ -6,16 +6,22 @@ process.env.JWT_SECRET = "test-secret-test-secret-test-secret-test-secret";
 process.env.BCRYPT_COST = "4";
 process.env.AUTH_RATE_LIMIT_MAX = "10000";
 process.env.RATE_LIMIT_MAX = "10000";
-process.env.STT_PROVIDER = "mock";
-process.env.SLM_PROVIDER = "mock";
-process.env.TTS_PROVIDER = "mock";
+// A production-shaped provider configuration. Nothing here is reachable: the fetch guard below blocks non-local
+// hosts and port 9 on localhost refuses connections, so tests inject fakes (tests/fakes.ts) or a mocked fetch.
+process.env.STT_PROVIDER = "groq";
+process.env.GROQ_API_KEY = "gsk_test_not_a_real_key";
+process.env.SLM_PROVIDER = "http";
+process.env.SLM_SERVICE_URL = "http://127.0.0.1:9";
+process.env.TTS_PROVIDER = "http";
+process.env.TTS_SERVICE_URL = "http://127.0.0.1:9";
+process.env.WORKER_API_KEY = "test-worker-key-test-worker-key";
 process.env.READINESS_REQUIRED = "database,stt,slm,tts";
 process.env.MAX_UPLOAD_BYTES = "1048576";
 process.env.TTS_MAX_INPUT_CHARACTERS = "500";
 process.env.CORS_ORIGINS = "http://localhost:3000";
 process.env.COOKIE_SAMESITE = "lax";
 // Never let real credentials from a local .env reach the test process.
-for (const name of ["GROQ_API_KEY", "WORKER_API_KEY", "SLM_BASE_URL", "SLM_API_KEY", "SLM_MODEL", "HF_TOKEN"]) {
+for (const name of ["SLM_BASE_URL", "SLM_API_KEY", "SLM_MODEL", "STT_SERVICE_URL", "HF_TOKEN"]) {
   delete process.env[name];
 }
 

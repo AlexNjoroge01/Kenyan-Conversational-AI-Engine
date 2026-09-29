@@ -3,7 +3,8 @@ import type { Server } from "node:http";
 import { createApp } from "../src/app";
 import { db } from "../src/db/client";
 import { usageEvents } from "../src/db/schema";
-import { createProvidersFromEnv, createServices, type Providers } from "../src/services/container";
+import { createServices, type Providers } from "../src/services/container";
+import { fakeProviders } from "./fakes";
 
 export interface TestServer {
   url: string;
@@ -11,7 +12,7 @@ export interface TestServer {
 }
 
 export async function startServer(overrides: Partial<Providers> = {}): Promise<TestServer> {
-  const app = createApp(createServices({ ...createProvidersFromEnv(), ...overrides }));
+  const app = createApp(createServices({ ...fakeProviders(), ...overrides }));
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });

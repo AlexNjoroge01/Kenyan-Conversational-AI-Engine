@@ -1,6 +1,8 @@
 # Kaggle GPU worker (Sauti V2 TTS + Qwen3.5-4B)
 
-`kenya_engine_worker.ipynb` runs both self-hosted models on Kaggle's free **GPU T4 ×2**. It serves them as one FastAPI app behind your **ngrok static domain**, so the API on Render can call it:
+Two notebooks:
+- **`kenya_engine_worker.ipynb`** runs both self-hosted models on Kaggle's free **GPU T4 ×2**. It serves them as one FastAPI app behind your **ngrok static domain**, so the API on Render can call it.
+- **`export_weights.ipynb`** (optional, run once on CPU) saves the ~13 GB of model weights as a Kaggle input, so the worker doesn't re-download them every session. See [Cache the weights](#cache-the-weights-skip-the-13-gb-download).
 
 ```
 Vercel (Next.js) ──► Render (Express API) ──► https://<NGROK_DOMAIN> ──► Kaggle notebook
@@ -48,8 +50,9 @@ The backend maps these to its public codes (`TTS_UNAVAILABLE`, `SLM_COMPLETION_F
 | 1 | `nvidia-smi`, checks for 2 GPUs and that all four secrets are present (names only are printed) | seconds |
 | 2 | installs pinned dependencies and prints their versions | a few minutes |
 | 3 | configuration (devices, pinned model revisions, limits) | instant |
-| 4 | downloads Chatterbox (3.2 GB) and the Sauti adapter (0.4 GB), rebuilds T3 with the 2,454-token vocabulary, applies and merges the LoRA, **verifies the adapter really applied**, warm-up | several minutes |
-| 5 | downloads Qwen3.5-4B (9.3 GB) and loads it text-only in fp16 on `cuda:1` | several minutes |
+| 3b | looks for an attached weights bundle in `/kaggle/input` (see [Cache the weights](#cache-the-weights-skip-the-13-gb-download)) | instant |
+| 4 | gets Chatterbox (3.2 GB) and the Sauti adapter (0.4 GB) from the bundle or Hugging Face, rebuilds T3 with the 2,454-token vocabulary, applies and merges the LoRA, **verifies the adapter really applied**, warm-up | several minutes (much less with the bundle) |
+| 5 | gets Qwen3.5-4B (9.3 GB) the same way and loads it text-only in fp16 on `cuda:1` | several minutes (much less with the bundle) |
 | 6 | builds the FastAPI app | instant |
 | 7 | starts uvicorn in a background thread and opens the ngrok tunnel on your domain, then checks the public `/health` | seconds |
 | 8 | **smoke test**: English, Kiswahili and code-switched speech (*"Nimefika office, I will call you nikimaliza meeting."*) saved as `/kaggle/working/smoke_*.wav`, one Kiswahili chat turn, and one unauthenticated request (must return 401). Prints per-request latency, real-time factor and peak VRAM | about a minute |
@@ -68,6 +71,31 @@ If one model fails to load, the other is still served: `/health` shows `"degrade
 5. The smoke-test results are in the log. Kaggle keeps a version's output files (the WAVs) only for runs that complete, so listen to the WAVs from an interactive run (A).
 
 Every hour the notebook runs counts against your weekly Kaggle GPU quota (about 30 hours, varying week to week), whether committed or interactive. Stop it when you're not using it.
+
+## Cache the weights (skip the 13 GB download)
+
+> **Optional, and a backup rather than the main path.** The default, and the recommended first run, is the plain Hugging Face download: no setup, and always the exact pinned revisions. Add this cache only once the worker runs cleanly. If the cache is missing, stale or incomplete, the worker simply downloads instead, so it can make startup faster but never break it.
+
+Kaggle sessions start with an empty disk, so without a cache every session downloads all ~13 GB from Hugging Face. That adds roughly 5–10 minutes to startup, and those minutes count against your GPU hours. The downloads happen on Kaggle's servers, not your machine or Render.
+
+To download them once and reuse them:
+
+**1. Export the weights once (CPU, no GPU hours)**
+1. Kaggle: **Create → New Notebook**, then **File → Import Notebook** and upload `workers/kaggle/export_weights.ipynb`. Name it e.g. `kenya-engine-weights-export`.
+2. Settings: **Accelerator → None**, **Internet → On**. Attaching the `HF_TOKEN` secret is optional; the repos are public.
+3. **Save Version → Save & Run All (Commit)**. It downloads the pinned weights into its output as `kenya-engine-weights/`, with a `MANIFEST.json` recording each repo and revision. Wait for the version to show **complete**. Kaggle keeps output only from runs that finish, which is why this is a separate notebook.
+
+**2. Attach it to the worker**
+1. Open `kenya_engine_worker` → right panel → **Add Input** → **Your Work** → **Notebooks** → pick the export notebook → **Add**.
+2. Run the worker. Cell 3b should print `Weights bundle attached at /kaggle/input/…`, and Cells 4 and 5 print `[weights] … using attached bundle`. The smoke test ends with `Weights loaded from: {'chatterbox': 'kaggle-input', 'sauti': 'kaggle-input', 'qwen': 'kaggle-input'}`.
+
+Optional: from the export version's **Output** tab, create a private **Dataset** from the files, and attach that instead with **Add Input → Datasets**. The worker finds the bundle either way, whether it sits in a `kenya-engine-weights/` folder or its contents are at the dataset's root.
+
+**How the worker decides:** for each model it uses the attached bundle only if the manifest has **exactly** the pinned repo and revision **and** every required file (including every Qwen shard in the index) is present. Otherwise it logs why and downloads that model from Hugging Face. A stale or partial bundle can never load the wrong weights; it only makes startup slower.
+
+**When the pins change:** if you bump a revision in Cell 3 of the worker, bump it the same way in Cell 2 of `export_weights.ipynb`, re-run the export (Save & Run All), and the attached input picks up the new version. The two notebooks must pin identical repos, revisions and file patterns.
+
+Sizes: bundle ≈ 12.9 GB (Qwen 9.3, Chatterbox 3.2, Sauti adapter 0.4). That fits within Kaggle's 20 GB output limit.
 
 ## Verify
 
@@ -140,4 +168,6 @@ The vendored chatterbox code in the toolkit matches the `chatterbox-tts==0.1.7` 
 | Qwen replies empty or garbled, or `GENERATION_FAILED` with inf/nan in the log | fp16 overflow. Try `SLM_DTYPE = "bfloat16"` (emulated on T4 and slower). Or switch the API to the hosted fallback (`SLM_PROVIDER=openai-compatible`) |
 | `ngrok failed to start` / endpoint already online | another session (interactive or committed) holds the domain. Stop it, then re-run Cell 7 |
 | `/health` works but the API still says `*_UNAVAILABLE` | `WORKER_API_KEY` differs between Kaggle and Render; the API logs "rejected our credentials" |
-| Very slow first request | expected: the first run downloads about 13 GB and warms up both models. Later requests reuse them |
+| Slow startup every session | attach the weights bundle ([Cache the weights](#cache-the-weights-skip-the-13-gb-download)) |
+| `[weights] … downloading instead` although the bundle is attached | the log says why: a revision mismatch (re-run the export after bumping pins) or missing files (the export didn't finish, so check the version completed) |
+| Very slow first request | model warm-up. Later requests are faster |

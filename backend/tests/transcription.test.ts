@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { buildWavTone } from "../src/services/tts/mock-tts.provider";
+import { buildWav } from "./fakes";
 import { bearer, newApiKey, startServer, type TestServer } from "./helpers";
 
 let server: TestServer;
@@ -10,7 +10,7 @@ beforeAll(async () => {
 });
 afterAll(() => server.close());
 
-const wav = () => new Blob([new Uint8Array(buildWavTone(0.5))], { type: "audio/wav" });
+const wav = () => new Blob([new Uint8Array(buildWav(0.5))], { type: "audio/wav" });
 
 function transcribe(fields: { file?: Blob; model?: string; language?: string }, headers = bearer(key)) {
   const form = new FormData();

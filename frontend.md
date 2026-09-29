@@ -47,7 +47,7 @@ How it was built:
   2. **API keys** (`Authorization: Bearer sk_live_…`) for the `/v1/*` AI endpoints.
 
   API keys are stored only as SHA-256 hashes, and the full key is shown exactly once. Passwords are bcrypt-hashed.
-- **Provider interfaces:** each model sits behind one (`SttProvider`, `SlmProvider`, `TtsProvider`), switchable by environment (`groq` / `http` worker / `openai-compatible` / `mock`). Swapping models never changes the public API.
+- **Provider interfaces:** each model sits behind one (`SttProvider`, `SlmProvider`, `TtsProvider`), switchable by environment (`groq` / `http` worker / `openai-compatible`); there is no mock mode. Swapping models never changes the public API.
 - **Usage logging:** every `/v1/*` request, including failed ones, writes a `usage_events` row (endpoint, model, status, duration, input characters, audio duration, error code). There is **no endpoint that reads usage back yet** (see §9).
 - **Request IDs:** every response has an `X-Request-ID` header, and every error uses the same JSON shape (§6).
 - **Model workers:** the GPU models run in a Kaggle notebook exposed through ngrok. That notebook is **not always on**. When it's off, chat and speech return `503 *_UNAVAILABLE` quickly, and the UI must handle this gracefully (§6.3).
@@ -59,7 +59,7 @@ How it was built:
 | The Render free tier sleeps after about 15 minutes of inactivity; the first request can take ~30–60 s | show a "waking up the server…" state; don't time out fetches early |
 | TTS on a T4 GPU is slow (can take tens of seconds, up to ~2 min for long text) | long-running spinner or progress state, a cancel button, disabled re-submit |
 | The Kaggle GPU worker may be offline | `/ready` shows `slm`/`tts` as `unavailable`; show a status banner and friendly 503 messages |
-| While providers are in mock mode, TTS returns a short WAV **tone** even if MP3 was requested | always use the response `Content-Type`, never the requested format |
+| TTS may return WAV even when MP3 was requested (if the worker can't encode MP3) | always use the response `Content-Type`, never the requested format |
 | API keys are shown once | force the user to copy or acknowledge the key before closing the dialog |
 
 ---
@@ -532,12 +532,9 @@ After deploying to Vercel, **report the production domain** (e.g. `https://your-
 ### 8.1 Local development
 
 - **Against Render:** leave `BACKEND_URL` at the Render URL and run `npm run dev` on port 3000.
-- **Against a local backend:** in `backend/`, run `bun run dev` (port 4000, with mock providers by default), then set `BACKEND_URL=http://localhost:4000`.
+- **Against a local backend:** in `backend/`, run `bun run dev` (port 4000), then set `BACKEND_URL=http://localhost:4000`.
 
-With mock providers:
-- STT returns a fixed Kiswahili sentence;
-- chat returns a canned reply;
-- TTS returns a short WAV tone.
+The backend has **no mock mode**: every reply comes from the real models (Groq for STT; the Kaggle notebook for chat and speech). If chat or speech return `503 *_UNAVAILABLE`, the Kaggle notebook isn't running. That is a backend or ops issue, not a frontend bug.
 
 ---
 

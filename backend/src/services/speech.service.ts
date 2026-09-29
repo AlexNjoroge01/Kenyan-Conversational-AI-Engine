@@ -15,7 +15,7 @@ export class SpeechService {
 
   async createSpeech(request: SpeechRequest): Promise<SpeechOutput> {
     const result = await this.tts.synthesize(request);
-    // Trust the worker's content type: it may legitimately differ (e.g. a mock that only emits WAV).
+    // Trust the worker's content type: it returns WAV when it cannot encode the requested MP3.
     const contentType = result.contentType || TTS_CONTENT_TYPES[request.response_format];
     const extension = contentType.includes("wav") ? "wav" : "mp3";
     return {

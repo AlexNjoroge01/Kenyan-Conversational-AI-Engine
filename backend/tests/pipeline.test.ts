@@ -1,15 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { createProvidersFromEnv, createServices } from "../src/services/container";
+import { createServices } from "../src/services/container";
 import type { SlmInput } from "../src/services/slm/slm.provider";
-import { buildWavTone } from "../src/services/tts/mock-tts.provider";
+import { buildWav, fakeProviders } from "./fakes";
 
-const audio = { buffer: buildWavTone(0.5), originalname: "clip.wav", mimetype: "audio/wav" };
+const audio = { buffer: buildWav(0.5), originalname: "clip.wav", mimetype: "audio/wav" };
 
 describe("voice pipeline (audio -> STT -> SLM -> TTS -> audio)", () => {
   test("runs all three stages and passes each output to the next", async () => {
     const seen: SlmInput[] = [];
     const providers = {
-      ...createProvidersFromEnv(),
+      ...fakeProviders(),
       slm: {
         complete: async (input: SlmInput) => {
           seen.push(input);
@@ -41,7 +41,7 @@ describe("voice pipeline (audio -> STT -> SLM -> TTS -> audio)", () => {
 
   test("a failing stage stops the pipeline with that stage's error", async () => {
     const providers = {
-      ...createProvidersFromEnv(),
+      ...fakeProviders(),
       slm: {
         complete: async () => {
           throw new Error("slm down");

@@ -2,14 +2,14 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { FetchLike } from "../src/services/provider-http";
 import { OpenAiCompatibleSlmProvider } from "../src/services/slm/openai-compatible-slm.provider";
 import { GroqSttProvider } from "../src/services/stt/groq-stt.provider";
-import { buildWavTone } from "../src/services/tts/mock-tts.provider";
+import { buildWav } from "./fakes";
 import { SautiTtsProvider } from "../src/services/tts/sauti-tts.provider";
 import { bearer, newApiKey, postJson, startServer, waitForUsageEvent, type TestServer } from "./helpers";
 
 // End-to-end through the public API with the real provider classes, each on a mocked fetch.
 // Nothing here reaches Groq, OpenRouter or the Kaggle worker.
 
-let ttsReply: () => Response = () => new Response(buildWavTone(0.5), { headers: { "content-type": "audio/wav" } });
+let ttsReply: () => Response = () => new Response(buildWav(0.5), { headers: { "content-type": "audio/wav" } });
 const workerFetch: FetchLike = async () => ttsReply();
 
 const groqFetch: FetchLike = async (url) =>
@@ -48,7 +48,7 @@ afterAll(() => server.close());
 describe("public API over real providers (mocked network)", () => {
   test("transcription keeps the public model ID, returns an ISO language code and records audio duration", async () => {
     const form = new FormData();
-    form.append("file", new Blob([new Uint8Array(buildWavTone(0.5))], { type: "audio/wav" }), "clip.wav");
+    form.append("file", new Blob([new Uint8Array(buildWav(0.5))], { type: "audio/wav" }), "clip.wav");
     form.append("model", "whisper-large-v3-turbo");
     const res = await fetch(`${server.url}/v1/audio/transcriptions`, { method: "POST", headers: bearer(key), body: form });
 
@@ -77,7 +77,7 @@ describe("public API over real providers (mocked network)", () => {
   });
 
   test("speech returns the worker's audio", async () => {
-    ttsReply = () => new Response(buildWavTone(0.5), { headers: { "content-type": "audio/wav", "x-audio-duration-seconds": "0.5" } });
+    ttsReply = () => new Response(buildWav(0.5), { headers: { "content-type": "audio/wav", "x-audio-duration-seconds": "0.5" } });
     const res = await postJson(`${server.url}/v1/audio/speech`, { model: "sauti-v2", input: "Habari", response_format: "wav" }, bearer(key));
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("audio/wav");

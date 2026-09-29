@@ -12,6 +12,12 @@ const optionalString = z
   .optional()
   .transform((v) => (v?.trim() ? v.trim() : undefined));
 
+/** Optional URL; an empty value (e.g. "SLM_BASE_URL=" copied from .env.example) counts as unset. */
+const optionalUrl = z.preprocess(
+  (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+  z.string().url().optional(),
+);
+
 const envSchema = z
   .object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -40,9 +46,10 @@ const envSchema = z
     RATE_LIMIT_MAX: z.coerce.number().int().positive().default(100),
     AUTH_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(10),
 
-    // STT: "groq" (hosted Whisper), "http" (self-hosted worker) or "mock".
-    STT_PROVIDER: z.enum(["groq", "http", "mock"]).default("http"),
-    STT_SERVICE_URL: z.string().url().default("http://localhost:8001"),
+    // Every provider is a real model service; there is no mock mode.
+    // STT: "groq" (hosted Whisper) or "http" (self-hosted Whisper worker).
+    STT_PROVIDER: z.enum(["groq", "http"]).default("groq"),
+    STT_SERVICE_URL: optionalUrl,
     STT_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
     GROQ_API_KEY: optionalString,
     GROQ_BASE_URL: z.string().url().default("https://api.groq.com/openai/v1"),
@@ -50,19 +57,20 @@ const envSchema = z
     // Groq's documented direct-upload limit is 25 MB on the free tier (100 MB on the dev tier).
     GROQ_STT_MAX_FILE_BYTES: z.coerce.number().int().positive().default(25_000_000),
 
-    // SLM: "http" (self-hosted worker), "openai-compatible" (hosted fallback) or "mock".
-    SLM_PROVIDER: z.enum(["http", "openai-compatible", "mock"]).default("http"),
-    SLM_SERVICE_URL: z.string().url().default("http://localhost:8002"),
+    // SLM: "http" (GPU worker, e.g. the Kaggle notebook) or "openai-compatible" (hosted fallback).
+    SLM_PROVIDER: z.enum(["http", "openai-compatible"]).default("http"),
+    SLM_SERVICE_URL: optionalUrl,
     SLM_SERVICE_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
-    SLM_BASE_URL: z.string().url().optional(),
+    SLM_BASE_URL: optionalUrl,
     SLM_API_KEY: optionalString,
     SLM_MODEL: optionalString,
     // How to ask an OpenAI-compatible host to skip thinking. "auto" picks "reasoning" for OpenRouter,
     // "chat_template_kwargs" (vLLM/SGLang style) otherwise. <think> blocks are always stripped regardless.
     SLM_DISABLE_THINKING: z.enum(["auto", "reasoning", "chat_template_kwargs", "none"]).default("auto"),
 
-    TTS_PROVIDER: z.enum(["http", "mock"]).default("http"),
-    TTS_SERVICE_URL: z.string().url().default("http://localhost:8000"),
+    // TTS: "http" (GPU worker, e.g. the Kaggle notebook).
+    TTS_PROVIDER: z.enum(["http"]).default("http"),
+    TTS_SERVICE_URL: optionalUrl,
     TTS_SERVICE_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
 
     // Shared secret sent to self-hosted GPU workers as X-Worker-Key.
@@ -76,6 +84,9 @@ const envSchema = z
       if (!cfg[field]) ctx.addIssue({ code: "custom", path: [field], message: `${field} is required when ${when}` });
     };
     if (cfg.STT_PROVIDER === "groq") require("GROQ_API_KEY", "STT_PROVIDER=groq");
+    if (cfg.STT_PROVIDER === "http") require("STT_SERVICE_URL", "STT_PROVIDER=http");
+    if (cfg.SLM_PROVIDER === "http") require("SLM_SERVICE_URL", "SLM_PROVIDER=http");
+    if (cfg.TTS_PROVIDER === "http") require("TTS_SERVICE_URL", "TTS_PROVIDER=http");
     if (cfg.SLM_PROVIDER === "openai-compatible") {
       require("SLM_BASE_URL", "SLM_PROVIDER=openai-compatible");
       require("SLM_MODEL", "SLM_PROVIDER=openai-compatible");

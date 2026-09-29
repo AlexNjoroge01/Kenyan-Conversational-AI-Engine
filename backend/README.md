@@ -32,10 +32,9 @@ Browser ──► Vercel (Next.js, later) ──/api/* rewrite──► Render: 
                      ┌───────────────────────────────────────┼─────────────────────────────────────┐
                      ▼                                       ▼                                     ▼
         SttProvider                              SlmProvider                          TtsProvider
-          ├─ GroqSttProvider ──► Groq API          ├─ QwenSlmProvider ──┐               ├─ SautiTtsProvider ──┐
-          ├─ WhisperSttProvider (self-hosted)      ├─ OpenAiCompatible  │               └─ MockTtsProvider    │
-          └─ MockSttProvider                       │   SlmProvider ──► OpenRouter / HF   (tone, no GPU)      │
-                                                   └─ MockSlmProvider   │                                    │
+          ├─ GroqSttProvider ──► Groq API          ├─ QwenSlmProvider ──┐               └─ SautiTtsProvider ──┐
+          └─ WhisperSttProvider (self-hosted)      └─ OpenAiCompatible  │                                     │
+                                                       SlmProvider ──► OpenRouter / HF                        │
                                                                         ▼                                    ▼
                                          https://<NGROK_DOMAIN> ──► Kaggle notebook (GPU T4 ×2), X-Worker-Key
                                                                      ├─ POST /complete    Qwen3.5-4B   cuda:1
@@ -50,17 +49,36 @@ The dependency direction is strict: middleware → routes → controllers → se
 
 The GPU worker is `../workers/kaggle/kenya_engine_worker.ipynb`; see [`../workers/kaggle/README.md`](../workers/kaggle/README.md).
 
+## Design decisions
+
+The choices behind the current setup, with the reasoning, so they aren't undone by accident.
+
+| Decision | Why |
+|---|---|
+| **No mock mode.** The API only runs against real model services; `*_PROVIDER=mock` is rejected at startup, and service URLs must be set explicitly (no localhost defaults) | A deployment left on mock providers served canned replies (a fixed transcript, a fixed chat answer, a tone instead of speech), and `/ready` still showed green. Real providers only means a misconfiguration fails loudly at boot, and `/ready` reports the truth |
+| **Automated tests use test-only fakes** (`tests/fakes.ts`) and mocked `fetch` | The test suite must not spend Groq quota or need the GPU notebook online. The fakes live only in `tests/`; application code can't reach them |
+| **STT on Groq** (Whisper Large V3 Turbo) | Same model as the spec, hosted, fast, with a free tier. It frees the T4 GPUs for the two models that have no hosted option |
+| **SLM and TTS on one Kaggle notebook** (2× T4: Sauti on `cuda:0` fp32, Qwen on `cuda:1` fp16, 8K context), exposed over ngrok with a shared `X-Worker-Key` | The only free GPU option available. One notebook serves both models so they share one tunnel and one URL. fp16 because the T4 has no fast bf16. The 8K context cap keeps Qwen (≈9.3 GB of weights) within a T4's ~15 GB |
+| **Sauti V2 loaded the way the fine-tuning toolkit does** (resize T3 to 2,454 tokens → PEFT LoRA → merge), with a check that the adapter really applied | The public reference Space fails, falls back silently, and serves the base English model. The notebook refuses to serve TTS rather than serve the wrong voice |
+| **Model weights download from Hugging Face by default; the Kaggle weights bundle is an optional cache** | Downloading needs no setup and always gets the exact pinned revisions, so it's the safest path for a first run. The cache (`export_weights.ipynb`, attached with *Add Input*) only saves the 5–10 minutes of GPU quota each start costs. The worker uses a bundle only if its revisions match and every file is present, and otherwise downloads, so the cache can make startup faster but never break it. Get the plain download working first, then add the cache |
+| **Pinned model revisions** in both notebooks | Reproducible deployments (spec §9). A model update upstream can't change behaviour silently |
+| **Hosted SLM fallback: OpenRouter `qwen/qwen3.5-9b`** (optional) | No hosted provider serves Qwen3.5-4B (checked 29 Sep 2026); the 9B is the nearest sibling. Clients still see `qwen3.5-4b`, so benchmark it before relying on it |
+| **Provider errors mapped to stable codes; bodies, keys and URLs never exposed** | Clients get `*_UNAVAILABLE` / `*_FAILED` / `RATE_LIMITED`; Groq, ngrok and Kaggle details stay internal (Blueprint §12–13) |
+| **Frontend through a same-origin `/api` rewrite on Vercel** | The session cookie stays first-party (`SameSite=Lax`), so third-party-cookie blocking can't break login, and no CORS is needed |
+
 ## Requirements
 
 - [Bun](https://bun.sh) ≥ 1.3
 - PostgreSQL 16+ (Docker Compose provides one; Neon in production)
-- **No GPU for the API or its tests.** Models run on Groq, the Kaggle notebook, or in-process mocks.
+- **No GPU on the API machine.** Models run on Groq and the Kaggle notebook. **There is no mock mode:** every environment, local included, talks to the real model services.
+- A Groq API key, and the Kaggle notebook running for chat and speech (see [Deployment](#deployment)).
 
-## Quick start (local, everything mocked)
+## Quick start (local, real models)
 
 ```bash
 bun install
-cp .env.example .env          # set JWT_SECRET (openssl rand -base64 48); providers default to mock
+cp .env.example .env          # set JWT_SECRET (openssl rand -base64 48), GROQ_API_KEY,
+                              # SLM_SERVICE_URL + TTS_SERVICE_URL (your ngrok domain) and WORKER_API_KEY
 docker compose up -d postgres
 bun run db:migrate
 bun run dev                   # http://localhost:4000  (docs at /docs)
@@ -78,18 +96,18 @@ All configuration comes from the environment and is validated at startup (`src/c
 | `COOKIE_SAMESITE` | `lax` | `lax` \| `strict` \| `none`. `none` is only for cross-site cookies and always forces `Secure`. Other values are `Secure` in production |
 | `CORS_ORIGINS` | `http://localhost:3000` | comma-separated allow-list (credentials enabled) |
 | `TRUST_PROXY` | `false` | `true` behind Render / any load balancer |
-| `STT_PROVIDER` | `http` | `groq` \| `http` (self-hosted worker) \| `mock` |
+| `STT_PROVIDER` | `groq` | `groq` \| `http` (self-hosted Whisper worker) |
 | `GROQ_API_KEY` | — | required when `STT_PROVIDER=groq` |
 | `GROQ_STT_MODEL` | `whisper-large-v3-turbo` | Groq's model ID (internal) |
 | `GROQ_STT_MAX_FILE_BYTES` | `25000000` | Groq's free-tier upload limit (25 MB; 100 MB on the dev tier). Uploads are capped at the lower of this and `MAX_UPLOAD_BYTES` |
 | `STT_TIMEOUT_MS` | `60000` | STT request timeout |
-| `STT_SERVICE_URL` | `http://localhost:8001` | self-hosted Whisper worker (`STT_PROVIDER=http`) |
-| `SLM_PROVIDER` | `http` | `http` (GPU worker) \| `openai-compatible` (hosted fallback) \| `mock` |
-| `SLM_SERVICE_URL`, `SLM_SERVICE_TIMEOUT_MS` | `http://localhost:8002`, `120000` | GPU worker for the SLM |
+| `STT_SERVICE_URL` | — | self-hosted Whisper worker; required when `STT_PROVIDER=http` |
+| `SLM_PROVIDER` | `http` | `http` (GPU worker) \| `openai-compatible` (hosted fallback) |
+| `SLM_SERVICE_URL`, `SLM_SERVICE_TIMEOUT_MS` | —, `120000` | GPU worker (your ngrok domain); URL required when `SLM_PROVIDER=http` |
 | `SLM_BASE_URL`, `SLM_API_KEY`, `SLM_MODEL` | — | fallback host, e.g. `https://openrouter.ai/api/v1`, `qwen/qwen3.5-9b` |
 | `SLM_DISABLE_THINKING` | `auto` | how thinking is switched off on the fallback: `reasoning` (OpenRouter), `chat_template_kwargs` (vLLM/SGLang/HF), `none`. `auto` picks by host |
-| `TTS_PROVIDER` | `http` | `http` (GPU worker) \| `mock` |
-| `TTS_SERVICE_URL`, `TTS_SERVICE_TIMEOUT_MS` | `http://localhost:8000`, `120000` | GPU worker for TTS |
+| `TTS_PROVIDER` | `http` | `http` (GPU worker) |
+| `TTS_SERVICE_URL`, `TTS_SERVICE_TIMEOUT_MS` | —, `120000` | GPU worker (same ngrok domain as the SLM); URL required |
 | `WORKER_API_KEY` | — | shared secret sent to the GPU worker as `X-Worker-Key`. **Required (≥16 chars) in production** when `TTS_PROVIDER` or `SLM_PROVIDER` is `http` |
 | `TTS_MAX_INPUT_CHARACTERS` | `4000` | keep at or below the worker's `TTS_MAX_CHARS` (1000) |
 | `MAX_UPLOAD_BYTES`, `MAX_JSON_BODY_BYTES` | 25 MiB, 1 MB | request size limits |
@@ -140,7 +158,7 @@ Replace `$API` with `http://localhost:4000` or `https://kenyan-conversational-ai
          "max_tokens":200}'
    # {"id":"chat_…","object":"chat.completion","model":"qwen3.5-4b","choices":[{"index":0,"message":{"role":"assistant","content":"…"},"finish_reason":"stop"}]}
    ```
-5. **Text to speech.** The response body is the audio. Trust `Content-Type`: WAV is returned if MP3 cannot be produced (the mock always returns a WAV tone):
+5. **Text to speech.** The response body is the audio. Trust `Content-Type`: WAV is returned if the worker cannot encode MP3:
    ```bash
    curl $API/v1/audio/speech -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
      -d '{"model":"sauti-v2","input":"Nimefika office, I will call you nikimaliza meeting.","voice":"default","response_format":"wav"}' \
@@ -217,22 +235,54 @@ Set Render's **Health Check Path** to `/` (or `/health`), **not** `/ready`: `/re
 
 If you previously set `AUTH_COOKIE_SAMESITE` or `STT_SERVICE_TIMEOUT_MS`, rename them as above.
 
-### Bring-up order
+### Bring-up and end-to-end testing
 
-1. **Kaggle first.** Import and run the notebook ([guide](../workers/kaggle/README.md)). Wait for Cell 8's smoke test to print `PASS`, then confirm from your machine:
-   ```bash
-   curl https://<NGROK_DOMAIN>/health   # {"status":"ok","models":{"tts":true,"slm":true}}
-   ```
-   For a long-running worker, stop the interactive session and use **Save Version → Save & Run All (Commit)**.
-2. **Render.** Set the environment above and deploy this version.
-3. **Test.**
+Order matters: **Kaggle first, then check Render, then the frontend.** Each step checks one layer, so when something fails you know which layer to look at.
+
+**Step 1: start the GPU worker on Kaggle** ([full guide](../workers/kaggle/README.md))
+1. Import `workers/kaggle/kenya_engine_worker.ipynb` (**File → Import Notebook**). Settings: **GPU T4 x2**, **Internet On**. Attach the four secrets (`HF_TOKEN`, `NGROK_TOKEN`, `NGROK_DOMAIN`, `WORKER_API_KEY`).
+2. **Don't attach a weights bundle for the first run**: let it download from Hugging Face (the default, see [Design decisions](#design-decisions)).
+3. **Run All** and wait. The first run downloads ~13 GB, so allow about 15–25 minutes. Check for:
+   - **Cell 1:** `OK: all secrets present`
+   - **Cell 4:** `Sauti V2 ready on cuda:0`
+   - **Cell 5:** `Qwen3.5-4B loaded as Qwen3_5ForCausalLM`
+   - **Cell 7:** public `/health: 200`
+   - **Cell 8:** `PASS` for the three TTS sentences, the chat turn and the auth check. Play `/kaggle/working/smoke_*.wav` from the file browser.
+4. From your machine: `curl https://<NGROK_DOMAIN>/health` → `{"status":"ok","models":{"tts":true,"slm":true}}`.
+
+If a cell fails, stop there and keep its output: that's the thing to fix. The API can't work around a worker that didn't load.
+
+**Step 2: check the API on Render**
+1. Make sure the deployed code is the latest commit (**Render → Events** shows the deployed commit) and the environment matches [Render environment](#render-environment). If the env is wrong, the service logs `Invalid environment configuration`, naming the variable, and doesn't start.
+2. Check readiness:
    ```bash
    API=https://kenyan-conversational-ai-engine.onrender.com
-   curl $API/                # {"name":"Kenyan Conversational AI API","version":"1.1.0","docs":"/docs",...}
-   curl $API/ready           # every dependency "ok"
+   curl $API/          # {"name":"Kenyan Conversational AI API","version":"1.1.0",...}
+   curl $API/ready     # {"status":"ready","dependencies":{"database":"ok","stt":"ok","slm":"ok","tts":"ok"}}
    ```
-   Then run the register → API key → transcription / chat / speech calls from [Using the API](#using-the-api). Also check that `usage_events` in Neon has a row per call.
-4. **When Kaggle is off**, `/v1/chat/completions` and `/v1/audio/speech` return `503 *_UNAVAILABLE` and never hang. To keep chat available, switch to the hosted fallback. TTS has no hosted fallback; `TTS_PROVIDER=mock` returns a test tone.
+   `/ready` now checks the real services, so each `unavailable` points at a layer:
+   - `stt`: the Groq key
+   - `slm`/`tts`: the Kaggle notebook, the ngrok URL, or `WORKER_API_KEY`
+   - `database`: Neon
+
+   The free Render instance sleeps: the first call after idling can take ~1 minute.
+3. Optional, with curl: register → create an API key → call the three `/v1` endpoints ([Using the API](#using-the-api)).
+
+**Step 3: test from the frontend (Vercel)**
+1. Confirm `CORS_ORIGINS` on Render includes your Vercel domain. The `/api` rewrite doesn't strictly need it, but it keeps the cross-site fallback working.
+2. Sign up (or log in) → **API keys** → create a key → *Use in playground*.
+3. **Speech to text:** record yourself saying something specific, e.g. *"Leo ni Jumanne, I will be in Nairobi."*. The transcript must match what you said, not a fixed sentence.
+4. **Chat:** ask something open-ended in Kiswahili/English. The reply must respond to what you typed and contain no `<think>`.
+5. **Text to speech:** *"Nimefika office, I will call you nikimaliza meeting."* You should hear speech, not a tone. Expect several seconds to a minute on the T4.
+6. **Voice turn:** record → transcript → reply → spoken reply.
+7. **Offline behaviour:** stop the Kaggle notebook and retry chat and speech. You should get a clear "service offline" message (`503 SLM_UNAVAILABLE` / `TTS_UNAVAILABLE`) within seconds, while STT keeps working.
+8. Optional: in Neon, `select endpoint, model, status, error_code, duration_ms from usage_events order by created_at desc limit 20;` should show one row per call.
+
+**Step 4: keep it running**
+- For longer sessions, stop the interactive session and use **Save Version → Save & Run All (Commit)**. Only one session can hold the ngrok domain at a time.
+- Once Step 1 works reliably, set up the optional [weights cache](../workers/kaggle/README.md#cache-the-weights-skip-the-13-gb-download) to cut 5–10 minutes (of GPU quota) from every start.
+
+When Kaggle is off, chat and speech return `503 *_UNAVAILABLE` and never hang. To keep chat available, switch to the hosted fallback below. TTS has no hosted fallback: speech is unavailable until the notebook is running again.
 
 ### Hosted SLM fallback
 
@@ -294,7 +344,8 @@ bun run typecheck
 ```
 
 Tests use a real PostgreSQL and **never touch the network**:
-- Every remote provider is tested with a mocked `fetch`.
+- The application has no mock mode. Tests inject **test-only** in-memory fakes (`tests/fakes.ts`) for the HTTP, auth, validation and usage-logging tests, so they don't spend Groq quota or need Kaggle online.
+- Every real provider class (Groq, GPU worker, OpenAI-compatible) is tested against a mocked `fetch`.
 - `tests/setup.ts` blocks any outbound request to a non-local host.
 - Credentials from a local `.env` are removed before the tests run.
 
@@ -310,7 +361,7 @@ To use a different Postgres, set `TEST_DATABASE_URL`, e.g. `TEST_DATABASE_URL=po
 ## Docker
 
 ```bash
-docker compose up --build api postgres     # API + DB with mocked models (needs JWT_SECRET in .env)
+docker compose up --build api postgres     # API + DB with real models (needs JWT_SECRET, GROQ_API_KEY, SLM/TTS_SERVICE_URL, WORKER_API_KEY in .env)
 docker compose --profile gpu up --build    # also starts the local GPU workers (NVIDIA GPU + container toolkit)
 ```
 

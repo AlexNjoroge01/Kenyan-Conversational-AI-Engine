@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { MockTtsProvider } from "../src/services/tts/mock-tts.provider";
+import { FakeTts } from "./fakes";
 import { startServer } from "./helpers";
 
 const servers: { close: () => Promise<void> }[] = [];
@@ -38,7 +38,7 @@ describe("health", () => {
   });
 
   test("GET /ready returns 503 when the TTS worker is down", async () => {
-    const server = await startServer({ tts: Object.assign(new MockTtsProvider(), { isHealthy: async () => false }) });
+    const server = await startServer({ tts: Object.assign(new FakeTts(), { isHealthy: async () => false }) });
     servers.push(server);
     const res = await fetch(`${server.url}/ready`);
     expect(res.status).toBe(503);
