@@ -163,6 +163,7 @@ The vendored chatterbox code in the toolkit matches the `chatterbox-tts==0.1.7` 
 | `Missing Kaggle secrets: …` | add or attach the named secrets (exact names), then restart the session |
 | `Expected 2 GPUs` | Settings → Accelerator → **GPU T4 x2** |
 | pip resolver warnings in Cell 2 | expected: Kaggle's preinstalled packages pin other versions. Only the printed versions of `transformers` (5.2.0), `chatterbox-tts` (0.1.7) and `peft` matter |
+| Cell 4: `ImportError: Found an incompatible version of torchao … only versions above 0.16.0` | Kaggle's preinstalled `torchao` 0.10 trips PEFT while applying the LoRA. Cell 2 now uninstalls it (nothing here uses it), and Cell 2 should print `torchao: not installed`. In a session started with an older copy of the notebook, run `%pip uninstall -y torchao`, then re-run Cell 4 |
 | `Sauti adapter was not applied …` | the adapter didn't match the rebuilt T3; TTS is disabled rather than serving the wrong voice. Report the Cell 4 output |
 | `WARNING: the Perth implicit watermarker is unavailable` | the watermarking dependency failed to import, so audio is served **without** Chatterbox's watermark. Report the Cell 2 output |
 | Qwen replies empty or garbled, or `GENERATION_FAILED` with inf/nan in the log | fp16 overflow. Try `SLM_DTYPE = "bfloat16"` (emulated on T4 and slower). Or switch the API to the hosted fallback (`SLM_PROVIDER=openai-compatible`) |
