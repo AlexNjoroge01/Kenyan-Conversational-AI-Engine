@@ -1,4 +1,9 @@
-/** Public model IDs. Never expose the underlying Hugging Face identifiers. */
+export const SERVICE = {
+  name: "Kenyan Conversational AI API",
+  version: "1.1.0",
+} as const;
+
+/** Public model IDs. Never expose the underlying provider (Groq, Hugging Face, worker) identifiers. */
 export const MODELS = {
   stt: "whisper-large-v3-turbo",
   slm: "qwen3.5-4b",

@@ -12,7 +12,11 @@ export function createTranscriptionController(stt: SttService) {
         originalname: file.originalname,
         mimetype: file.mimetype,
       });
-      res.locals.usage = { ...res.locals.usage, providerLatencyMs: result.latencyMs };
+      res.locals.usage = {
+        ...res.locals.usage,
+        audioDurationSeconds: result.durationSeconds,
+        providerLatencyMs: result.latencyMs,
+      };
       sendJson(res, { text: result.text, model: result.model, language: result.language });
     }) as RequestHandler,
   };

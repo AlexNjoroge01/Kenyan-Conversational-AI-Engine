@@ -1,5 +1,5 @@
 import { env } from "../config/env";
-import { MODELS, TTS_FORMATS } from "../config/constants";
+import { MODELS, SERVICE, TTS_FORMATS } from "../config/constants";
 
 const errorResponse = (description: string, code: string, message: string) => ({
   description,
@@ -15,7 +15,11 @@ const v1Errors = {
   "400": errorResponse("Validation error.", "VALIDATION_ERROR", "Invalid request."),
   "401": errorResponse("Missing, invalid or revoked API key.", "API_KEY_INVALID", "The API key provided is invalid."),
   "404": errorResponse("Model not found.", "MODEL_NOT_FOUND", "The model 'x' does not exist or is not supported."),
-  "429": errorResponse("Rate limit exceeded.", "RATE_LIMITED", "Too many requests. Please slow down."),
+  "429": errorResponse(
+    "Rate limit exceeded: either your API key's limit, or the model service is at capacity. Honour the `Retry-After` header when present.",
+    "RATE_LIMITED",
+    "Too many requests. Please slow down.",
+  ),
   "500": errorResponse("Unexpected server error.", "INTERNAL_ERROR", "An unexpected error occurred."),
 };
 
@@ -44,8 +48,8 @@ const setCookieHeader = {
 export const openApiDocument = {
   openapi: "3.0.3",
   info: {
-    title: "Kenyan Conversational AI API",
-    version: "1.0.0",
+    title: SERVICE.name,
+    version: SERVICE.version,
     description: [
       "Speech-to-text, language model and text-to-speech APIs tuned for English, Kiswahili and code-switching.",
       "",
@@ -56,6 +60,8 @@ export const openApiDocument = {
       "4. Call any `/v1/*` endpoint.",
       "",
       "Every response carries an `X-Request-ID` header; quote it when reporting problems.",
+      "",
+      "**Model service errors** use stable codes: `*_UNAVAILABLE` (503: the model service is offline, starting up or timed out, so retry later), `*_FAILED` (422 when the model service rejected the input, 502 when it failed), and `RATE_LIMITED` (429, with `Retry-After` when known).",
     ].join("\n"),
   },
   servers: [{ url: "/", description: "This server" }],
@@ -221,6 +227,22 @@ export const openApiDocument = {
     },
   },
   paths: {
+    "/": {
+      get: {
+        tags: ["Health"],
+        summary: "Service information",
+        responses: {
+          "200": {
+            description: "Service name, version and documentation links.",
+            content: {
+              "application/json": {
+                example: { name: SERVICE.name, version: SERVICE.version, docs: "/docs", openapi: "/openapi.json" },
+              },
+            },
+          },
+        },
+      },
+    },
     "/health": {
       get: {
         tags: ["Health"],
@@ -237,7 +259,8 @@ export const openApiDocument = {
       get: {
         tags: ["Health"],
         summary: "Dependency readiness",
-        description: "Checks PostgreSQL and the model workers. Returns 503 when a required dependency is unavailable.",
+        description:
+          "Checks PostgreSQL and whether each active model service is reachable. Returns 503 when a dependency the server requires (READINESS_REQUIRED) is unavailable. Model service results are cached for about 10 seconds.",
         responses: {
           "200": {
             description: "Ready.",
@@ -354,7 +377,8 @@ export const openApiDocument = {
       post: {
         tags: ["Audio"],
         summary: "Text to speech",
-        description: "Generates speech with `sauti-v2` and returns the audio bytes directly.",
+        description:
+          "Generates speech with `sauti-v2` and returns the audio bytes directly. The `Content-Type` response header is authoritative: if the requested format cannot be produced, WAV (`audio/wav`) is returned. Generation is slow on the current hardware; allow up to about two minutes for long inputs.",
         security: [{ bearerAuth: [] }],
         requestBody: { required: true, content: { "application/json": { schema: { $ref: "#/components/schemas/SpeechRequest" } } } },
         responses: {
@@ -366,9 +390,10 @@ export const openApiDocument = {
             },
           },
           ...v1Errors,
+          "422": errorResponse("The model service could not process this input.", "TTS_GENERATION_FAILED", "The text-to-speech service could not process this input."),
           "501": errorResponse("`stream: true` is not supported yet.", "NOT_IMPLEMENTED", "Streaming speech generation is not yet supported."),
           "502": errorResponse("Generation failed.", "TTS_GENERATION_FAILED", "The text-to-speech service failed to process the request."),
-          "503": errorResponse("TTS worker unavailable.", "TTS_UNAVAILABLE", "The text-to-speech service is currently unavailable."),
+          "503": errorResponse("Text-to-speech temporarily unavailable (offline or timed out).", "TTS_UNAVAILABLE", "The text-to-speech service is currently unavailable."),
         },
       },
     },
@@ -376,7 +401,7 @@ export const openApiDocument = {
       post: {
         tags: ["Audio"],
         summary: "Speech to text",
-        description: "Transcribes an uploaded audio file with `whisper-large-v3-turbo`.",
+        description: `Transcribes an uploaded audio file with \`whisper-large-v3-turbo\`. Maximum file size: ${(env.maxUploadBytes / 1_000_000).toFixed(0)} MB.`,
         security: [{ bearerAuth: [] }],
         requestBody: {
           required: true,
@@ -399,8 +424,9 @@ export const openApiDocument = {
           ...v1Errors,
           "413": errorResponse("File too large.", "PAYLOAD_TOO_LARGE", "The uploaded file exceeds the size limit."),
           "415": errorResponse("Unsupported audio type.", "UNSUPPORTED_MEDIA_TYPE", "Unsupported audio type 'text/plain'."),
+          "422": errorResponse("The audio could not be processed.", "STT_TRANSCRIPTION_FAILED", "The speech-to-text service could not process this input."),
           "502": errorResponse("Transcription failed.", "STT_TRANSCRIPTION_FAILED", "The speech-to-text service failed to process the request."),
-          "503": errorResponse("STT worker unavailable.", "STT_UNAVAILABLE", "The speech-to-text service is currently unavailable."),
+          "503": errorResponse("Speech-to-text temporarily unavailable (offline or timed out).", "STT_UNAVAILABLE", "The speech-to-text service is currently unavailable."),
         },
       },
     },
@@ -408,15 +434,17 @@ export const openApiDocument = {
       post: {
         tags: ["Chat"],
         summary: "Chat completion",
-        description: "Generates an assistant reply with `qwen3.5-4b`. Send prior turns in `messages` for conversation history.",
+        description:
+          "Generates an assistant reply with `qwen3.5-4b`. Send prior turns in `messages` for conversation history. Replies never include the model's hidden reasoning (`<think>` content is removed).",
         security: [{ bearerAuth: [] }],
         requestBody: { required: true, content: { "application/json": { schema: { $ref: "#/components/schemas/ChatRequest" } } } },
         responses: {
           "200": { description: "Completion.", content: { "application/json": { schema: { $ref: "#/components/schemas/ChatCompletion" } } } },
           ...v1Errors,
+          "422": errorResponse("The model service could not process this input (e.g. the conversation is too long).", "SLM_COMPLETION_FAILED", "The language model service could not process this input."),
           "501": errorResponse("`stream: true` is not supported yet.", "NOT_IMPLEMENTED", "Streaming chat completions are not yet supported."),
-          "502": errorResponse("Completion failed.", "SLM_COMPLETION_FAILED", "The language model service failed to process the request."),
-          "503": errorResponse("SLM worker unavailable.", "SLM_UNAVAILABLE", "The language model service is currently unavailable."),
+          "502": errorResponse("Completion failed or returned an invalid or empty response.", "SLM_COMPLETION_FAILED", "The language model service failed to process the request."),
+          "503": errorResponse("Language model temporarily unavailable (offline or timed out).", "SLM_UNAVAILABLE", "The language model service is currently unavailable."),
         },
       },
     },

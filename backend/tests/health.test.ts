@@ -8,6 +8,16 @@ afterAll(async () => {
 });
 
 describe("health", () => {
+  test("GET / returns the service name, version and a link to the docs", async () => {
+    const server = await startServer();
+    servers.push(server);
+    const res = await fetch(`${server.url}/`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ name: "Kenyan Conversational AI API", version: expect.any(String), docs: "/docs", openapi: "/openapi.json" });
+    expect((await fetch(`${server.url}/`, { method: "HEAD" })).status).toBe(200);
+  });
+
   test("GET /health returns ok", async () => {
     const server = await startServer();
     servers.push(server);

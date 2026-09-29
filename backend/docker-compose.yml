@@ -33,13 +33,15 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/kenya_engine
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (openssl rand -base64 48)}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
-      # Override to "http" (and start the gpu profile) to use the real workers.
+      # Override to "http" (and start the gpu profile) to use the local workers, or STT_PROVIDER=groq with GROQ_API_KEY.
       STT_PROVIDER: ${STT_PROVIDER:-mock}
       SLM_PROVIDER: ${SLM_PROVIDER:-mock}
       TTS_PROVIDER: ${TTS_PROVIDER:-mock}
       STT_SERVICE_URL: http://stt-worker:8001
       SLM_SERVICE_URL: http://slm-worker:8002
       TTS_SERVICE_URL: http://tts-worker:8000
+      WORKER_API_KEY: ${WORKER_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
     healthcheck:
       test: ["CMD", "bun", "-e", "fetch('http://localhost:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s

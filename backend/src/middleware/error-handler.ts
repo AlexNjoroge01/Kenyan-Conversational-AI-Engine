@@ -9,18 +9,19 @@ interface NormalizedError {
   code: ErrorCode;
   message: string;
   details?: ErrorDetail[];
+  headers?: Record<string, string>;
 }
 
 function normalize(err: unknown): NormalizedError {
   if (err instanceof AppError) {
-    return { status: err.status, code: err.code, message: err.message, details: err.details };
+    return { status: err.status, code: err.code, message: err.message, details: err.details, headers: err.headers };
   }
   if (err instanceof multer.MulterError) {
     if (err.code === "LIMIT_FILE_SIZE") {
       return {
         status: 413,
         code: "PAYLOAD_TOO_LARGE",
-        message: `The uploaded file exceeds the ${Math.round(env.MAX_UPLOAD_BYTES / 1024 / 1024)}MB limit.`,
+        message: `The uploaded file exceeds the ${(env.maxUploadBytes / 1_000_000).toFixed(0)} MB limit.`,
       };
     }
     return { status: 400, code: "VALIDATION_ERROR", message: `Invalid upload: ${err.message}` };
@@ -46,6 +47,7 @@ export const errorHandler: ErrorRequestHandler = (err, req, res, next) => {
     logger.error({ err, requestId: req.id, code: normalized.code }, "request failed");
   }
 
+  if (normalized.headers) res.set(normalized.headers);
   res.status(normalized.status).json({
     error: {
       code: normalized.code,

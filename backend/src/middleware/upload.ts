@@ -6,7 +6,8 @@ import { AppError, validationError } from "../utils/errors";
 
 const multipart = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: env.MAX_UPLOAD_BYTES, files: 1, fields: 10 },
+  // Already lowered to the STT provider's own limit when that is smaller (see env.maxUploadBytes).
+  limits: { fileSize: env.maxUploadBytes, files: 1, fields: 10 },
 }).single("file");
 
 /** Parses a multipart upload with a single audio `file` field, enforcing presence, media type and size. */

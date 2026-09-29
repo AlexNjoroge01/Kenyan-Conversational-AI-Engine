@@ -1,17 +1,11 @@
-import type { CookieOptions, RequestHandler, Response } from "express";
+import type { RequestHandler, Response } from "express";
 import { env } from "../config/env";
 import { authService } from "../services/auth.service";
+import { authCookieOptions } from "../utils/cookies";
 import { durationToMs } from "../utils/crypto";
 import { sendJson } from "../utils/response";
 
-function cookieOptions(): CookieOptions {
-  return {
-    httpOnly: true,
-    secure: env.isProduction || env.AUTH_COOKIE_SAMESITE === "none",
-    sameSite: env.AUTH_COOKIE_SAMESITE,
-    path: "/",
-  };
-}
+const cookieOptions = () => authCookieOptions(env.COOKIE_SAMESITE, env.isProduction);
 
 function setAuthCookie(res: Response, token: string): void {
   res.cookie(env.AUTH_COOKIE_NAME, token, { ...cookieOptions(), maxAge: durationToMs(env.JWT_EXPIRES_IN) });

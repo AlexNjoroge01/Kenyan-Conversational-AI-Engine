@@ -1,23 +1,43 @@
-import { AppError } from "../../utils/errors";
-import { callWorker, checkWorkerHealth } from "../worker-http";
+import {
+  cachedHealthCheck,
+  callProvider,
+  invalidResponse,
+  readJsonObject,
+  workerHeaders,
+  workerModelHealthy,
+  type ProviderContext,
+  type WorkerProviderOptions,
+} from "../provider-http";
 import type { SlmInput, SlmProvider, SlmResult } from "./slm.provider";
+import { stripThinking } from "./thinking";
 
-/** Talks to the Qwen worker: POST /complete {messages,...} -> {content}. */
+const CTX: ProviderContext = {
+  label: "language model",
+  provider: "gpu-worker",
+  codes: { unavailable: "SLM_UNAVAILABLE", failed: "SLM_COMPLETION_FAILED" },
+};
+
+/** Talks to the self-hosted Qwen worker: POST /complete {messages,...} -> {content}. */
 export class QwenSlmProvider implements SlmProvider {
-  constructor(
-    private readonly baseUrl: string,
-    private readonly timeoutMs: number,
-  ) {}
+  private readonly baseUrl: string;
+  readonly isHealthy: () => Promise<boolean>;
+
+  constructor(private readonly options: WorkerProviderOptions) {
+    this.baseUrl = options.baseUrl.replace(/\/+$/, "");
+    this.isHealthy = cachedHealthCheck(() =>
+      workerModelHealthy(this.baseUrl, "slm", options.workerApiKey, options.fetch),
+    );
+  }
 
   async complete(input: SlmInput): Promise<SlmResult> {
-    const response = await callWorker({
+    const response = await callProvider({
+      ...CTX,
       url: `${this.baseUrl}/complete`,
-      timeoutMs: this.timeoutMs,
-      label: "language model",
-      codes: { unavailable: "SLM_UNAVAILABLE", failed: "SLM_COMPLETION_FAILED" },
+      timeoutMs: this.options.timeoutMs,
+      fetch: this.options.fetch,
       init: {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...workerHeaders(this.options.workerApiKey) },
         body: JSON.stringify({
           messages: input.messages,
           temperature: input.temperature,
@@ -27,14 +47,10 @@ export class QwenSlmProvider implements SlmProvider {
       },
     });
 
-    const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
-    if (!body || typeof body.content !== "string") {
-      throw new AppError("SLM_COMPLETION_FAILED", "The language model service returned an invalid response.", 502);
-    }
-    return { content: body.content };
-  }
-
-  isHealthy(): Promise<boolean> {
-    return checkWorkerHealth(this.baseUrl);
+    const body = await readJsonObject(response, CTX);
+    if (typeof body.content !== "string") throw invalidResponse(CTX);
+    const content = stripThinking(body.content);
+    if (!content) throw invalidResponse(CTX, "returned an empty response");
+    return { content };
   }
 }

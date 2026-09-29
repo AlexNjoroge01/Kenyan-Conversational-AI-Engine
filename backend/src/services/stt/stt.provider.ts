@@ -8,6 +8,8 @@ export interface SttInput {
 export interface SttResult {
   text: string;
   language: string;
+  /** Length of the input audio, when the provider reports it. */
+  durationSeconds?: number;
 }
 
 export interface SttProvider {

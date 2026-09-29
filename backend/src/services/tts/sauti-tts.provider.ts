@@ -1,47 +1,62 @@
 import { TTS_CONTENT_TYPES } from "../../config/constants";
-import { AppError } from "../../utils/errors";
-import { callWorker, checkWorkerHealth } from "../worker-http";
+import {
+  cachedHealthCheck,
+  callProvider,
+  invalidResponse,
+  readBytes,
+  workerHeaders,
+  workerModelHealthy,
+  type ProviderContext,
+  type WorkerProviderOptions,
+} from "../provider-http";
 import type { TtsInput, TtsProvider, TtsResult } from "./tts.provider";
+
+const CTX: ProviderContext = {
+  label: "text-to-speech",
+  provider: "gpu-worker",
+  codes: { unavailable: "TTS_UNAVAILABLE", failed: "TTS_GENERATION_FAILED" },
+};
 
 /** Talks to the Sauti V2 worker: POST /synthesize {text, voice, format} -> audio bytes. */
 export class SautiTtsProvider implements TtsProvider {
-  constructor(
-    private readonly baseUrl: string,
-    private readonly timeoutMs: number,
-  ) {}
+  private readonly baseUrl: string;
+  readonly isHealthy: () => Promise<boolean>;
+
+  constructor(private readonly options: WorkerProviderOptions) {
+    this.baseUrl = options.baseUrl.replace(/\/+$/, "");
+    this.isHealthy = cachedHealthCheck(() =>
+      workerModelHealthy(this.baseUrl, "tts", options.workerApiKey, options.fetch),
+    );
+  }
 
   async synthesize(input: TtsInput): Promise<TtsResult> {
-    const response = await callWorker({
+    const response = await callProvider({
+      ...CTX,
       url: `${this.baseUrl}/synthesize`,
-      timeoutMs: this.timeoutMs,
-      label: "text-to-speech",
-      codes: { unavailable: "TTS_UNAVAILABLE", failed: "TTS_GENERATION_FAILED" },
+      timeoutMs: this.options.timeoutMs,
+      fetch: this.options.fetch,
       init: {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...workerHeaders(this.options.workerApiKey) },
         body: JSON.stringify({ text: input.text, voice: input.voice, format: input.format }),
       },
     });
 
-    let audio: Buffer;
-    try {
-      audio = Buffer.from(await response.arrayBuffer());
-    } catch {
-      throw new AppError("TTS_UNAVAILABLE", "The text-to-speech service is currently unavailable.", 503);
+    const contentType = response.headers.get("content-type")?.split(";")[0]?.trim() ?? TTS_CONTENT_TYPES[input.format];
+    if (!contentType.startsWith("audio/")) {
+      // e.g. an HTML interstitial or JSON from something other than the worker.
+      await response.body?.cancel().catch(() => undefined);
+      throw invalidResponse(CTX);
     }
-    if (audio.length === 0) {
-      throw new AppError("TTS_GENERATION_FAILED", "The text-to-speech service returned empty audio.", 502);
-    }
+
+    const audio = await readBytes(response, CTX);
+    if (audio.length === 0) throw invalidResponse(CTX, "returned empty audio");
 
     const duration = Number(response.headers.get("x-audio-duration-seconds"));
     return {
       audio,
-      contentType: response.headers.get("content-type") ?? TTS_CONTENT_TYPES[input.format],
+      contentType,
       durationSeconds: Number.isFinite(duration) && duration > 0 ? duration : undefined,
     };
-  }
-
-  isHealthy(): Promise<boolean> {
-    return checkWorkerHealth(this.baseUrl);
   }
 }

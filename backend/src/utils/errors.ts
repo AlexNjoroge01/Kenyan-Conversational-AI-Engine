@@ -31,6 +31,8 @@ export class AppError extends Error {
     message: string,
     public readonly status: number,
     public readonly details?: ErrorDetail[],
+    /** Extra response headers, e.g. Retry-After. */
+    public readonly headers?: Record<string, string>,
   ) {
     super(message);
     this.name = "AppError";
