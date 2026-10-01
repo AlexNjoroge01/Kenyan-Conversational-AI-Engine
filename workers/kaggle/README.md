@@ -124,6 +124,23 @@ curl -i -X POST https://<NGROK_DOMAIN>/complete -H "Content-Type: application/js
 
 Then check the API end to end: `GET https://kenyan-conversational-ai-engine.onrender.com/ready` should report `tts` and `slm` as `ok`. See `backend/README.md` → *Deployment*.
 
+## Measured on Kaggle (2× T4), 29 Sep 2026
+
+The first full run: every smoke test passed, with weights downloaded from Hugging Face (no cache attached). Environment: torch 2.10.0+cu128, transformers 5.2.0, peft 0.19.1, chatterbox-tts 0.1.7, torchao uninstalled.
+
+| Metric | Sauti V2 (`cuda:0`, fp32) | Qwen3.5-4B (`cuda:1`, fp16) |
+|---|---|---|
+| Load (cold) | 30.4 s, plus an 11.0 s warm-up generation | 14.6 s |
+| VRAM | 3.1 GiB allocated (3.2 GiB peak while generating) of 15 GiB | 7.8 GiB allocated (7.9 GiB peak) of 15 GiB |
+| Latency | English 5.0 s for 4.0 s of audio (RTF 1.25); Kiswahili 5.4 s / 5.0 s (RTF 1.07); code-switched 3.6 s / 3.2 s (RTF 1.14) | 4.0–4.7 s for a short Kiswahili customer-service reply (≤128 new tokens) |
+| Sampling speed | ~32 speech tokens/s | |
+
+What this means:
+- **TTS runs at about real time.** A request takes roughly as long as the audio it produces, so the API's `TTS_MAX_INPUT_CHARACTERS=500` (≈30–40 s of speech) stays well inside the 120 s timeout.
+- **There is VRAM headroom on both GPUs.**
+- **Correction (1 Oct 2026): the `alignment_stream_analyzer` warnings were a bug, not a safety net.** ("Detected 2x repetition … forcing EOS token".) Chatterbox enables that analyzer for *any* 2,454-token vocabulary, so Sauti got the multilingual model's guard. Its token-repetition rule ends speech whenever two consecutive speech tokens match, which is normal in pauses and long vowels. In live voice conversations that cut replies short or left them silent. The worker now disables it (`TTS_ALIGNMENT_GUARD = False`); see [Speech cut off or silent](#speech-cut-off-or-silent).
+- **The Kiswahili replies are understandable but not always idiomatic.** Track that in the Kenyan evaluation set (spec §7), not as a bug.
+
 ## How Sauti V2 is loaded (and why not like the reference Space)
 
 `msingiai/sauti_tts_v2` is a PEFT LoRA (r=128, alpha=256) on Chatterbox's **T3** module. It targets the Llama projections plus `spkr_enc`, and it also carries fully retrained `text_emb`/`text_head` for a 2,454-token multilingual grapheme vocabulary. The adapter's `adapter_config.json` points at the [chatterbox-finetuning](https://github.com/gokhaneraslan/chatterbox-finetuning) toolkit's T3, and the notebook reproduces that toolkit's `inference.py` / `merge_lora.py` in standard (non-Turbo) mode:
@@ -147,7 +164,10 @@ The vendored chatterbox code in the toolkit matches the `chatterbox-tts==0.1.7` 
 | Setting | Default | Notes |
 |---|---|---|
 | `TTS_MAX_CHARS` | 1000 | keep the API's `TTS_MAX_INPUT_CHARACTERS` at or below this |
-| `TTS_CHUNK_CHARS` | 250 | text is split at sentence boundaries; chunks are joined with a 0.2 s pause |
+| `TTS_CHUNK_CHARS` | 150 | text is split at sentence boundaries into chunks of about 3–10 s of speech (like Sauti's training clips); chunks are joined with a 0.2 s pause |
+| `TTS_ALIGNMENT_GUARD` | `False` | Chatterbox's multilingual alignment analyzer. Off because it cut Sauti's speech short; `True` only to experiment |
+| `TTS_MAX_ATTEMPTS` | 2 | a chunk whose audio is empty or implausibly short or long is generated again; the attempt closest to a natural speaking rate is kept |
+| `TTS_CHARS_PER_SECOND` | (5, 25) | plausible speaking rate, used for the retry decision and the smoke test's cut-off check |
 | `TTS_PARAMS` | temperature 0.8, repetition penalty 1.2, cfg 0.5, exaggeration 0.5 | the toolkit's LoRA inference settings |
 | `REFERENCE_VOICE_WAV` | `None` (Chatterbox's built-in voice) | path to a clean 5–10 s clip to use another voice, e.g. from an attached Kaggle dataset |
 | `TRIM_TRAILING_SILENCE` | `True` | Silero VAD trims trailing noise and hallucinations, as the toolkit does |
@@ -155,6 +175,21 @@ The vendored chatterbox code in the toolkit matches the `chatterbox-tts==0.1.7` 
 | `SLM_MAX_CONTEXT_TOKENS` | 8192 | prompt plus new tokens; longer conversations get `413 CONTEXT_TOO_LONG` |
 | `SLM_DEFAULT_MAX_NEW_TOKENS` / `SLM_MAX_NEW_TOKENS` | 512 / 1024 | |
 | Model revisions | pinned commit SHAs | bump them deliberately |
+
+## Speech cut off or silent
+
+In live voice conversations, Sauti sometimes spoke only part of the reply, or nothing at all. Causes and fixes (1 Oct 2026):
+
+| Cause | Fix in the worker |
+|---|---|
+| Chatterbox enables its multilingual `AlignmentStreamAnalyzer` because Sauti's vocabulary has 2,454 tokens (`T3Config.is_multilingual` is just a vocabulary-size check). Its rule "two identical speech tokens in a row → end speech now" fires on ordinary pauses and long vowels | disabled for Sauti (`TTS_ALIGNMENT_GUARD = False`). Sauti uses the English model's normal stopping behaviour, and Cell 4 checks the setting applied |
+| One bad chunk (forced end after a token or two) made the whole request fail as `EMPTY_GENERATION`, so nothing was spoken | each chunk is retried (`TTS_MAX_ATTEMPTS`) when its audio is empty or implausibly short or long for its text; the attempt closest to a natural speaking rate is kept |
+| Chat replies contain line breaks (the tokenizer drops them and glues the words together), markdown symbols (spoken as noise) and emoji (unknown tokens) | `prepare_tts_text` turns line breaks into sentence breaks, strips markdown, and drops characters the tokenizer doesn't know |
+| Long chunks (up to 250 characters) were far longer than Sauti's 3–10 s training clips | chunks are now at most 150 characters, split at sentence boundaries |
+
+Cell 8's smoke test now includes a chat-style reply and checks the speaking rate: a reply spoken much faster than ~25 characters/second means words were dropped, and is reported as `FAIL (cut short or runaway?)`. The worker log prints one line per chunk (`[tts] chunk N chars -> X s audio, K attempt(s)`), never the text itself.
+
+**Also check the API limit.** If a chat reply is longer than the API's `TTS_MAX_INPUT_CHARACTERS` (500 on Render), `/v1/audio/speech` rejects it with `400 VALIDATION_ERROR` and nothing is spoken. The fix is either a voice prompt with shorter replies (`max_tokens` ≈ 120), or raising the limit up to the worker's 1,000. At the measured RTF of ~1.1, 1,000 characters (~75 s of speech) takes ~85 s, inside the 120 s timeout.
 
 ## Troubleshooting
 
@@ -164,9 +199,11 @@ The vendored chatterbox code in the toolkit matches the `chatterbox-tts==0.1.7` 
 | `Expected 2 GPUs` | Settings → Accelerator → **GPU T4 x2** |
 | pip resolver warnings in Cell 2 | expected: Kaggle's preinstalled packages pin other versions. Only the printed versions of `transformers` (5.2.0), `chatterbox-tts` (0.1.7) and `peft` matter |
 | Cell 4: `ImportError: Found an incompatible version of torchao … only versions above 0.16.0` | Kaggle's preinstalled `torchao` 0.10 trips PEFT while applying the LoRA. Cell 2 now uninstalls it (nothing here uses it), and Cell 2 should print `torchao: not installed`. In a session started with an older copy of the notebook, run `%pip uninstall -y torchao`, then re-run Cell 4 |
+| Speech cut off, or nothing spoken | see [Speech cut off or silent](#speech-cut-off-or-silent). If the log still shows `forcing EOS token`, the session is running an older copy of the notebook: re-import it |
 | `Sauti adapter was not applied …` | the adapter didn't match the rebuilt T3; TTS is disabled rather than serving the wrong voice. Report the Cell 4 output |
 | `WARNING: the Perth implicit watermarker is unavailable` | the watermarking dependency failed to import, so audio is served **without** Chatterbox's watermark. Report the Cell 2 output |
 | Qwen replies empty or garbled, or `GENERATION_FAILED` with inf/nan in the log | fp16 overflow. Try `SLM_DTYPE = "bfloat16"` (emulated on T4 and slower). Or switch the API to the hosted fallback (`SLM_PROVIDER=openai-compatible`) |
+| Cell 7: `WARNING: … /health through the tunnel did not answer with the worker's JSON` (older copies crashed with `JSONDecodeError`) | ngrok answered with its own HTML error page, usually because the check ran before the tunnel was live. The server and tunnel are running anyway; re-run `check_public_health()`. If it persists, the printed `ngrok-error-code` says why: `ERR_NGROK_3200` tunnel offline, `ERR_NGROK_8012` ngrok can't reach the local server, `ERR_NGROK_334` domain in use by another session |
 | `ngrok failed to start` / endpoint already online | another session (interactive or committed) holds the domain. Stop it, then re-run Cell 7 |
 | `/health` works but the API still says `*_UNAVAILABLE` | `WORKER_API_KEY` differs between Kaggle and Render; the API logs "rejected our credentials" |
 | Slow startup every session | attach the weights bundle ([Cache the weights](#cache-the-weights-skip-the-13-gb-download)) |

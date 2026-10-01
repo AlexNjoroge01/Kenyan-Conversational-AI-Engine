@@ -371,7 +371,7 @@ The API image contains no models and applies migrations on start. The compose AP
 
 | Worker | Status |
 |---|---|
-| `../workers/kaggle/kenya_engine_worker.ipynb` (Sauti V2 + Qwen3.5-4B) | **production path.** The FastAPI app is tested locally with fake models, including against these backend providers. Model loading and inference on the T4s are **not yet run**; see the notebook README |
+| `../workers/kaggle/kenya_engine_worker.ipynb` (Sauti V2 + Qwen3.5-4B) | **production path, verified on Kaggle 2× T4 (29 Sep 2026).** Both models load and all smoke tests pass: TTS at about real time (RTF 1.1–1.25, 3.2 GiB VRAM), and chat replies in ~4–5 s (7.9 GiB VRAM). See [measurements](../workers/kaggle/README.md#measured-on-kaggle-2-t4-29-sep-2026) |
 | Groq (Whisper Large V3 Turbo) | hosted; the provider is tested with mocked responses only |
 | `../workers/stt-worker`, `slm-worker`, `tts-worker` (Docker) | untested local alternatives. `tts-worker` still has the Sauti `load_adapter` TODO; the notebook's Cell 4 has the working approach to port |
 
